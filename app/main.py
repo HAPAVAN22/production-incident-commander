@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     pool = ConnectionPool(
         conninfo=settings.database_url,
-        min_size=settings.database_min_size,
+        min_size=settings.db_pool_min_size,
         max_size=max(
             settings.db_pool_max_size,
             settings.db_pool_min_size,

@@ -14,8 +14,8 @@ class Settings(BaseSettings):
     db_pool_max_size: int = Field(default=5, ge=1)
 
     model_config = SettingsConfigDict(
-        env_file=".env"
-        env_file_encoding="utf-8"
+        env_file=".env",
+        env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )

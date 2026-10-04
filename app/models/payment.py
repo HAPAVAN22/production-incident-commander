@@ -17,6 +17,7 @@ class PaymentStatus(StrEnum):
     FAILED = "FAILED"
 
 class PaymentCreate(BaseModel):
+    customer_id: UUID
     amount: Decimal = Field(
         gt=Decimal("0"),
         max_digits=12,
@@ -39,7 +40,7 @@ class PaymentCreate(BaseModel):
                 "Currency must be a 3-letter alphabetic code"
             )
         
-        raise value
+        return value
     
 class PaymentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

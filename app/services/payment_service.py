@@ -7,7 +7,7 @@ from psycopg_pool import ConnectionPool
 
 from app.events.publisher import EventPublisher
 from app.models.payment import PaymentCreate, PaymentResponse
-from app.repositories import event_repository, payment_repository
+from app.repositories import customer_repository, event_repository, payment_repository
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,15 @@ class PaymentService:
         start_time = perf_counter()
 
         with self.pool.connection() as connection:
+            if not customer_repository.customer_exists(
+                connection,
+                payload.customer_id,
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Customer not found",
+                )
+            
             payment = payment_repository.create_payment(
                 connection,
                 transaction_id=transaction_id,
