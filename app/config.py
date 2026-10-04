@@ -12,6 +12,9 @@ class Settings(BaseSettings):
 
     db_pool_min_size: int = Field(default=1, ge=1)
     db_pool_max_size: int = Field(default=5, ge=1)
+    outbox_poll_interval_seconds : int = Field(default=5, ge=1)
+    outbox_batch_size: int = Field(default=10, ge=1)
+    outbox_max_attempts: int = Field(default=3, ge=1)
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+import threading
 from time import perf_counter
 from uuid import UUID, uuid4
 
@@ -9,6 +10,8 @@ from psycopg_pool import ConnectionPool
 
 from app.api.routes.payments import router as payments_router
 from app.config import get_settings
+from app.events.outbox_worker import run_worker
+from app.events.publisher import KafkaEventPublisher
 from app.models.payment import HealthResponse
 
 settings = get_settings()
@@ -33,18 +36,57 @@ async def lifespan(app: FastAPI):
         kwargs={"autocommit": False}
     )
 
-    pool.open()
-    pool.wait(timeout=10)
-    app.state.db_pool = pool
-
-    logger.info(
-        "Database connection pool created",
-        extra={"app_env": settings.app_env},
-    )
+    publisher = None
+    worker_thread = None
+    stop_event = threading.Event()
 
     try:
+        pool.open()
+        pool.wait(timeout=10)
+        app.state.db_pool = pool
+
+        logger.info("Database connection pool created")
+
+        publisher = KafkaEventPublisher()
+        # app.state.event_publisher = publisher
+
+        # logger.info("Kafka event publisher created")
+
+        worker_thread = threading.Thread(
+            target=run_worker,
+            kwargs={
+                "pool": pool,
+                "publisher": publisher,
+                "stop_event": stop_event,
+            },
+            name="OutboxWorkerThread",
+            daemon=False,
+        )
+        worker_thread.start()
+
+        logger.info("Outbox worker thread started")
+
         yield
+
     finally:
+        # if publisher is not None:
+        #     publisher.close()
+        #     logger.info("Kafka event publisher closed")
+
+        stop_event.set()
+
+        if worker_thread is not None:
+            worker_thread.join(timeout=15)
+
+            if worker_thread.is_alive():
+                logger.error("Outbox worker thread did not terminate within timeout")
+
+        if publisher is not None:
+            try:
+                publisher.close()
+            except Exception:
+                logger.exception("kafka_publisher_close_failed")
+
         pool.close()
         logger.info("Database connection pool closed")
 
