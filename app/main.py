@@ -8,11 +8,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 
+from prometheus_client import make_asgi_app
+
 from app.api.routes.payments import router as payments_router
 from app.config import get_settings
 from app.events.outbox_worker import run_worker
 from app.events.publisher import KafkaEventPublisher
 from app.models.payment import HealthResponse
+from app.metrics import http_requests_total, http_request_duration_seconds
 
 settings = get_settings()
 
@@ -96,6 +99,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
+
 app.include_router(payments_router, prefix="/api/v1")
 
 @app.middleware("http")
@@ -141,6 +147,21 @@ async def request_context_middleware(
     response.headers["X-Request-ID"] = str(request.state.request_id)
     response.headers["X-Trace-ID"] = str(request.state.trace_id)
 
+    duration_seconds = perf_counter() - started
+
+    http_requests_total.labels(
+        method=request.method,
+        path=request.url.path,
+        status_code=str(response.status_code),
+    ).inc()
+
+    http_request_duration_seconds.labels(
+        method=request.method,
+        path=request.url.path,
+    ).observe(duration_seconds)
+
+    duration_ms = int(duration_seconds * 1000)
+
     logger.info(
         "http_request_completed",
         extra={
@@ -149,9 +170,7 @@ async def request_context_middleware(
             "method": request.method,
             "path": request.url.path,
             "status_code": response.status_code,
-            "duration_ms": int(
-                (perf_counter() - started) * 1000
-            ),
+            "duration_ms": duration_ms,
         },
     )
 
