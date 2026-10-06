@@ -100,3 +100,19 @@ def mark_event_failed(
             event_id,
         ),
     )
+
+def get_pending_event_count(
+    connection,
+) -> int:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM event_outbox
+            WHERE status = 'PENDING'
+            """
+        )
+
+        result = cursor.fetchone()
+
+    return result[0]

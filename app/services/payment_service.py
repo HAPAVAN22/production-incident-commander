@@ -13,6 +13,11 @@ from app.repositories import (
     outbox_repository,
     payment_repository,
 )
+from app.metrics import (
+    payment_requests_total,
+    payment_failures_total,
+)
+
 logger = logging.getLogger(__name__)
 
 class PaymentService:
@@ -29,79 +34,110 @@ class PaymentService:
         request_id: UUID,
         trace_id: UUID,
     ) -> PaymentResponse:
+        payment_requests_total.labels(
+            operation="create",
+        ).inc()
+            
         transaction_id = uuid4()
         start_time = perf_counter()
 
-        with self.pool.connection() as connection:
-            if not customer_repository.customer_exists(
-                connection,
-                payload.customer_id,
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Customer not found",
+        try:
+            with self.pool.connection() as connection:
+                if not customer_repository.customer_exists(
+                    connection,
+                    payload.customer_id,
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Customer not found",
+                    )
+                
+                payment = payment_repository.create_payment(
+                    connection,
+                    transaction_id=transaction_id,
+                    payload=payload,
                 )
+
+                latency_ms = int((perf_counter() - start_time) * 1000)
+
+                event_repository.create_payment_event(
+                    connection,
+                    transaction_id=transaction_id,
+                    request_id=request_id,
+                    trace_id=trace_id,
+                    latency_ms=latency_ms,
+                )
+
+                event_id = uuid4()
+
+                event_payload = {
+                    "event_id": str(event_id),
+                    "event_type": "payment.created",
+                    "transaction_id": str(payment.transaction_id),
+                    "customer_id": str(payment.customer_id),
+                    "amount": str(payment.amount),
+                    "currency": payment.currency,
+                    "status": payment.payment_status,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "request_id": str(request_id),
+                    "trace_id": str(trace_id),
+                }
+
+                outbox_repository.create_outbox_event(
+                    connection,
+                    event_id=event_id,
+                    aggregate_id=payment.transaction_id,
+                    event_type="payment.created",
+                    payload=event_payload,
+                )
+
             
-            payment = payment_repository.create_payment(
-                connection,
-                transaction_id=transaction_id,
-                payload=payload,
+            # self.publisher.publish_payment_created(
+            #     transaction_id=payment.transaction_id,
+            #     customer_id=payment.customer_id,
+            #     amount=str(payment.amount),
+            #     currency=payment.currency,
+            #     status=payment.payment_status,
+            #     request_id=request_id,
+            #     trace_id=trace_id,
+            # )
+
+            logger.info(
+                "payment_created",
+                extra={
+                    "transaction_id": str(payment.transaction_id),
+                    "request_id": str(request_id),
+                    "trace_id": str(trace_id),
+                },
             )
 
-            latency_ms = int((perf_counter() - start_time) * 1000)
-
-            event_repository.create_payment_event(
-                connection,
-                transaction_id=transaction_id,
-                request_id=request_id,
-                trace_id=trace_id,
-                latency_ms=latency_ms,
-            )
-
-            event_id = uuid4()
-
-            event_payload = {
-                "event_id": str(event_id),
-                "event_type": "payment.created",
-                "transaction_id": str(payment.transaction_id),
-                "customer_id": str(payment.customer_id),
-                "amount": str(payment.amount),
-                "currency": payment.currency,
-                "status": payment.payment_status,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "request_id": str(request_id),
-                "trace_id": str(trace_id),
-            }
-
-            outbox_repository.create_outbox_event(
-                connection,
-                event_id=event_id,
-                aggregate_id=payment.transaction_id,
-                event_type="payment.created",
-                payload=event_payload,
-            )
-
+            return payment
         
-        # self.publisher.publish_payment_created(
-        #     transaction_id=payment.transaction_id,
-        #     customer_id=payment.customer_id,
-        #     amount=str(payment.amount),
-        #     currency=payment.currency,
-        #     status=payment.payment_status,
-        #     request_id=request_id,
-        #     trace_id=trace_id,
-        # )
+        except HTTPException:
+            payment_failures_total.labels(
+                operation="create",
+            ).inc()
 
-        logger.info(
-            "payment_created",
-            extra={
-                "transaction_id": str(payment.transaction_id),
-                "request_id": str(request_id),
-                "trace_id": str(trace_id),
-            },
-        )
+            raise
 
-        return payment
+        except Exception as e:
+            payment_failures_total.labels(
+                operation="create",
+            ).inc()
+
+            logger.exception(
+                "payment_creation_failed",
+                extra={
+                    "request_id": str(request_id),
+                    "trace_id": str(trace_id),
+                    "error": str(e),
+                },
+            )
+
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create payment",
+            ) from e
     
     def get_payment(
         self,

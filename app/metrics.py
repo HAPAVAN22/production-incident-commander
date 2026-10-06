@@ -1,5 +1,4 @@
-from prometheus_client import Counter, Histogram
-
+from prometheus_client import Counter, Gauge, Histogram
 
 http_requests_total = Counter(
     "http_requests_total",
@@ -23,4 +22,27 @@ payment_failures_total = Counter(
     "payment_failures_total",
     "Total number of failed payment requests",
     ["operation"],
+)
+
+outbox_events_published_total = Counter(
+    "outbox_events_published_total",
+    "Total number of outbox events successfully published to Kafka",
+    ["event_type"],
+)
+
+outbox_events_failed_total = Counter(
+    "outbox_events_failed_total",
+    "Total number of outbox event publish failures",
+    ["event_type"],
+)
+
+outbox_publish_latency_seconds = Histogram(
+    "outbox_publish_latency_seconds",
+    "Time taken to publish an outbox event to Kafka",
+    ["event_type"],
+)
+
+outbox_events_pending = Gauge(
+    "outbox_events_pending",
+    "Number of outbox events currently pending publication",
 )
