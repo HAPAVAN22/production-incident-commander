@@ -46,3 +46,27 @@ outbox_events_pending = Gauge(
     "outbox_events_pending",
     "Number of outbox events currently pending publication",
 )
+
+kafka_messages_consumed_total = Counter(
+    "kafka_messages_consumed_total",
+    "Total number of Kafka messages successfully consumed",
+    ["topic"],
+)
+
+kafka_message_processing_failures_total = Counter(
+    "kafka_message_processing_failures_total",
+    "Total number of Kafka message processing failures",
+    ["topic"],
+)
+
+kafka_message_processing_latency_seconds = Histogram(
+    "kafka_message_processing_latency_seconds",
+    "Time taken to process a Kafka message",
+    ["topic"],
+)
+
+kafka_consumer_lag = Gauge(
+    "kafka_consumer_lag",
+    "Current Kafka consumer lag",
+    ["topic", "partition"],
+)

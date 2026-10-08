@@ -31,7 +31,7 @@ def process_pending_events(
             limit=BATCH_SIZE,
         )
 
-    pending_count = outbox_repository.get_pending_event_count(
+        pending_count = outbox_repository.get_pending_event_count(
             connection,
         )
 
@@ -51,13 +51,15 @@ def process_pending_events(
                     event_id=event_id,
                 )
 
+            publish_started = time.perf_counter()
+
             publisher.publish_outbox_event(
                 event_id=event_id,
                 aggregate_id=aggregate_id,
                 payload=event["payload"],
             )
 
-            publish_duration = perf_counter() - publish_started
+            publish_duration = time.perf_counter() - publish_started
 
             outbox_publish_latency_seconds.labels(
                 event_type=event_type,
