@@ -3,6 +3,8 @@ import logging
 import os
 import time
 
+from prometheus_client import start_http_server
+
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
 
@@ -47,6 +49,8 @@ def update_consumer_lag(
         ).set(lag)
 
 def main() -> None:
+    start_http_server(8001)
+
     topic = os.getenv(
         "KAFKA_PAYMENT_TOPIC",
         "payment-events",
@@ -60,7 +64,7 @@ def main() -> None:
     consumer = KafkaConsumer(
         topic,
         bootstrap_servers=bootstrap_servers,
-        group_id="payment-event-consumer",
+        group_id="payment-event-consumer-2",
         auto_offset_reset="earliest",
         enable_auto_commit=False,
         value_deserializer=lambda value: json.loads(value.decode("utf-8")),
