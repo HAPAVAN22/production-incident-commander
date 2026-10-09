@@ -64,7 +64,7 @@ def main() -> None:
     consumer = KafkaConsumer(
         topic,
         bootstrap_servers=bootstrap_servers,
-        group_id="payment-event-consumer-2",
+        group_id="payment-event-consumer-new",
         auto_offset_reset="earliest",
         enable_auto_commit=False,
         value_deserializer=lambda value: json.loads(value.decode("utf-8")),
