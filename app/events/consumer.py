@@ -70,6 +70,8 @@ def main() -> None:
         value_deserializer=lambda value: json.loads(value.decode("utf-8")),
     )
 
+    consumer.subscribe([topic])
+
     logger.info(
         "payment_event_consumer_started",
         extra={"topic": topic},
@@ -101,6 +103,8 @@ def main() -> None:
 
                 processing_duration = time.perf_counter() - started
 
+                consumer.commit()
+
                 kafka_message_processing_latency_seconds.labels(
                     topic=message.topic,
                 ).observe(processing_duration)
@@ -109,12 +113,6 @@ def main() -> None:
                     topic=message.topic,
                 ).inc()
 
-                consumer.commit()
-
-                update_consumer_lag(
-                    consumer,
-                    topic,
-                )
             except KafkaError as e:
                 kafka_message_processing_failures_total.labels(
                     topic=message.topic,
@@ -128,6 +126,13 @@ def main() -> None:
                         "offset": message.offset,
                     },
                 )
+
+            finally:
+                duration = time.perf_counter() - started
+
+                kafka_message_processing_latency_seconds.labels(
+                    topic=message.topic,
+                ).observe(duration)
     except KafkaError:
         logger.exception("kafka_consumer_error")
     finally:
