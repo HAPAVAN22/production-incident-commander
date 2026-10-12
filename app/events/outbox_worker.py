@@ -45,6 +45,15 @@ def process_pending_events(
         event_type = event["event_type"]
 
         try:
+            if event["attempts"] >= outbox_repository.MAX_ATTEMPTS:
+                with pool.connection() as connection:
+                    outbox_repository.mark_event_failed(
+                        connection,
+                        event_id=event_id,
+                        error="Maximum publication attempts exhausted",
+                    )
+                continue
+            
             with pool.connection() as connection:
                 outbox_repository.mark_event_attempted(
                     connection,
