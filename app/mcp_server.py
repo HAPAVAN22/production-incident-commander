@@ -138,7 +138,7 @@ def get_kafka_consumer_health() -> dict[str, Any]:
 
     results = {
         name: _prometheus_query(query)
-        for name, query in queries.items
+        for name, query in queries.items()
     }
 
     return {
@@ -159,3 +159,114 @@ def get_kafka_consumer_health() -> dict[str, Any]:
             "the consumer is expected to receive messages."
         ),
     }
+
+@mcp.tool()
+def get_outbox_backlog() -> dict[str, Any]:
+    """
+    Outbox counts by status, oldest pending event, recent events that exhausted their retries
+    """
+    counts = _db_query(
+        """
+        SELECT
+            status,
+            COUNT(*)::BIGINT AS event_count
+        FROM event_outbox
+        GROUP BY status
+        ORDER BY status
+        """
+    )
+
+    oldest_pending = _db_query(
+        """
+        SELECT
+            event_id,
+            aggregate_id,
+            event_type,
+            attempts,
+            created_at,
+            EXTRACT(
+                EPOCH FROM (NOW() - created_at)
+            )::BIGINT AS age_seconds,
+            last_error
+        FROM event_outbox
+        WHERE status = 'PENDING'
+        ORDER BY created_at ASC
+        LIMIT 1
+        """
+    )
+
+    failed = _db_query(
+        """
+        SELECT
+            event_id,
+            aggregate_id,
+            event_type,
+            attempts,
+            created_at,
+            last_error
+        FROM event_outbox
+        WHERE status = 'FAILED'
+        ORDER BY created_at DESC
+        LIMIT 10
+        """
+    )
+
+    return {
+        "status_counts": {
+            row["status"]: row["event_count"]
+            for row in counts
+        },
+
+        "oldest_pending_event": (
+            oldest_pending[0]
+            if oldest_pending
+            else None
+        ),
+
+        "recent_failed_events": failed,
+
+        "max_attempts_configured": (
+            settings.outbox_max_attempts
+        ),
+    }
+
+@mcp.tool()
+def get_failed_payments(
+    limit: int = 20,
+) -> dict[str, Any]:
+    """
+    List recent payment orders whose payment_status is FAILED.
+    """
+
+    safe_limit = max(
+        1,
+        min(limit, 100),
+    )
+
+    rows = _db_query(
+        """
+        SELECT
+            transaction_id,
+            customer_id,
+            amount,
+            currency,
+            payment_status,
+            payment_method,
+            created_at,
+            updated_at
+        FROM payment_orders
+        WHERE UPPER(payment_status) = 'FAILED'
+        ORDER BY updated_at DESC
+        LIMIT %s
+        """,
+        (safe_limit,),
+    )
+
+    return {
+        "count_returned": len(rows),
+        "limit": safe_limit,
+        "payments": rows,
+    }
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")

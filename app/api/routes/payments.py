@@ -1,3 +1,5 @@
+import os
+
 from uuid import UUID
 
 from fastapi import(
@@ -22,6 +24,11 @@ router = APIRouter(
     tags=["payments"],
 )
 
+SIMULATION_ENABLED = (
+    os.getenv("ENABLE_FAILURE_SIMULATION", "false").lower()
+    == "true"
+)
+
 @router.post(
     "",
     response_model=PaymentResponse,
@@ -33,6 +40,16 @@ def create_payment(
     response: Response,
     pool: ConnectionPool = Depends(get_pool),
 ) -> PaymentResponse:
+
+    if (
+        SIMULATION_ENABLED
+        and request.headers.get("X-Simulate-Failure", "").lower() == "true"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Simulated payment service failure",
+        )
+    
     payment = create_payment_handler(payload, request, pool)
 
     response.headers["X-Request-ID"] = str(request.state.request_id)

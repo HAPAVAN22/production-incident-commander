@@ -44,7 +44,7 @@ def main() -> None:
         bootstrap_servers=bootstrap_servers,
         group_id=group_id,
         enable_auto_commit=False,
-        request_timeout_ms=10000,
+        request_timeout_ms=11000,
     )
 
     known_partitions = set()
