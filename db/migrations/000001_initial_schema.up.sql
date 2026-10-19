@@ -40,33 +40,3 @@ CREATE TABLE service_events (
         FOREIGN KEY (transaction_id)
         REFERENCES payment_orders(transaction_id)
 );
-
--- Incidents
-CREATE TABLE incidents (
-    incident_id UUID PRIMARY KEY,
-    incident_type VARCHAR(50) NOT NULL,
-    severity VARCHAR(20) NOT NULL,
-    status VARCHAR(20) NOT NULL,
-    title VARCHAR(255) NOT NULL,
-    description TEXT,
-    affected_service VARCHAR(100),
-    started_at TIMESTAMPTZ NOT NULL,
-    resolved_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- Transactions associated with incidents
-CREATE TABLE incident_transactions (
-    incident_id UUID NOT NULL,
-    transaction_id UUID NOT NULL,
-
-    PRIMARY KEY (incident_id, transaction_id),
-
-    CONSTRAINT fk_incident
-        FOREIGN KEY (incident_id)
-        REFERENCES incidents(incident_id),
-
-    CONSTRAINT fk_transaction
-        FOREIGN KEY (transaction_id)
-        REFERENCES payment_orders(transaction_id)
-);

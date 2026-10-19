@@ -4,10 +4,14 @@ import sys
 
 from datetime import datetime, timezone
 from typing import Any
+from uuid import UUID
+
+from psycopg_pool import ConnectionPool
 
 from mcp.server.fastmcp import FastMCP
 
 from app.config import get_settings
+from app.repositories import incident_repository
 from app.mcp_utilities import (
     _json_safe,
     _db_query,
@@ -26,6 +30,13 @@ logger = logging.getLogger(
 
 settings = get_settings()
 
+db_pool = ConnectionPool(
+    conninfo=settings.database_url,
+    min_size=1,
+    max_size=5,
+    open=True,
+)
+
 PROMETHEUS_URL = os.getenv(
     "PROMETHEUS_URL",
     "http://localhost:9090",
@@ -34,15 +45,18 @@ PROMETHEUS_URL = os.getenv(
 mcp = FastMCP(
     "Production Incident Commander",
     instructions=(
-        "Read-only incident-investigation tools for a payment system. "
+        "Production incident investigation tools for a payment system. "
         "Correlate evidence from PostgreSQL and Prometheus. "
-        "Do not claim a root cause unless the returned evidence "
-        "supports it. Distinguish observed facts from hypotheses."
+        "Use diagnostic tools to collect observed facts and persist "
+        "relevant findings as incident evidence. "
+        "Do not claim a root cause unless the evidence supports it. "
+        "Clearly distinguish observed facts from hypotheses. "
+        "Do not resolve incidents without sufficient investigation "
+        "and explicit supporting findings."
     )
 )
 
-@mcp.tool()
-def get_service_health() -> dict[str, Any]:
+def collect_service_health() -> dict[str, Any]:
     """
     API availability, HTTP 5xx rate, p95 latency, Kafka consumer lag
     """
@@ -104,8 +118,7 @@ def get_service_health() -> dict[str, Any]:
         ],
     }
 
-@mcp.tool()
-def get_kafka_consumer_health() -> dict[str, Any]:
+def collect_kafka_consumer_health() -> dict[str, Any]:
     """
     Kafka consumer throughput, processing failures, processing latency, consumer lag and exporter availability
     """
@@ -160,8 +173,7 @@ def get_kafka_consumer_health() -> dict[str, Any]:
         ),
     }
 
-@mcp.tool()
-def get_outbox_backlog() -> dict[str, Any]:
+def collect_outbox_backlog() -> dict[str, Any]:
     """
     Outbox counts by status, oldest pending event, recent events that exhausted their retries
     """
@@ -230,9 +242,8 @@ def get_outbox_backlog() -> dict[str, Any]:
         ),
     }
 
-@mcp.tool()
-def get_failed_payments(
-    limit: int = 20,
+def collect_failed_payments(
+    limit: int = 20
 ) -> dict[str, Any]:
     """
     List recent payment orders whose payment_status is FAILED.
@@ -267,6 +278,238 @@ def get_failed_payments(
         "limit": safe_limit,
         "payments": rows,
     }
+
+def run_incident_investigation(
+    incident_id: UUID
+) -> dict[str, Any]:
+    """
+    Run diagnostics and persist their results as incident evidence.
+    This is ordinary Python logic called by the MCP-exposed tool.
+    """
+
+    with db_pool.connection() as connection:
+        incident = incident_repository.get_incident(
+            connection=connection,
+            incident_id=incident_id,
+        )
+
+        if incident is None:
+            return {"error": "Incident not found"}
+
+        if incident["status"] == "RESOLVED":
+            return {
+                "error": "Cannot investigate a resolved incident",
+                "incident_id": str(incident_id),
+            }
+
+        # 2. Mark an open incident as being investigated.
+        if incident["status"] == "OPEN":
+            incident = incident_repository.update_incident_status(
+                connection=connection,
+                incident_id=incident_id,
+                status="INVESTIGATING",
+            )
+
+    # 3. Collect each diagnostic independently.
+    collectors = {
+        "service_health": collect_service_health,
+        "kafka_consumer_health": collect_kafka_consumer_health,
+        "outbox_backlog": collect_outbox_backlog,
+        "failed_payments": collect_failed_payments,
+    }
+
+    results: dict[str, Any] = {}
+    failures: dict[str, str] = {}
+
+    for name, collector in collectors.items():
+        try:
+            results[name] = collector()
+
+        except Exception as exc:
+            # Preserve the other diagnostic results if one fails.
+            logger.exception(
+                "Diagnostic collector failed: %s",
+                name,
+            )
+
+            failures[name] = str(exc)
+
+    # 4. Persist results and failures as incident evidence.
+    evidence_records = []
+
+    with db_pool.connection() as connection:
+        for name, result in results.items():
+            evidence = incident_repository.add_incident_evidence(
+                connection=connection,
+                incident_id=incident_id,
+                event_type="DIAGNOSTIC_RESULT",
+                source=name,
+                details=result,
+            )
+
+            evidence_records.append({
+                "id": str(evidence["id"]),
+                "source": name,
+                "event_type": "DIAGNOSTIC_RESULT",
+            })
+
+        for name, error in failures.items():
+            evidence = incident_repository.add_incident_evidence(
+                connection=connection,
+                incident_id=incident_id,
+                event_type="DIAGNOSTIC_COLLECTION_FAILED",
+                source=name,
+                details={
+                    "available": False,
+                    "error": error,
+                },
+            )
+
+            evidence_records.append({
+                "id": str(evidence["id"]),
+                "source": name,
+                "event_type": "DIAGNOSTIC_COLLECTION_FAILED",
+            })
+
+        # Fetch the incident again so the response includes
+        # the evidence that was just persisted.
+        updated_incident = incident_repository.get_incident(
+            connection=connection,
+            incident_id=incident_id,
+        )
+
+    # 5. Return a structured investigation report.
+    return _json_safe({
+        "incident_id": str(incident_id),
+        "status": updated_incident["status"],
+        "diagnostics_completed": list(results.keys()),
+        "diagnostics_failed": failures,
+        "results": results,
+        "evidence_records": evidence_records,
+        "evidence_count": len(evidence_records),
+        "conclusion": (
+            "Diagnostics collected. Findings have been persisted. "
+            "No root cause has been automatically established."
+        ),
+    })
+
+@mcp.tool()
+def get_service_health() -> dict[str, Any]:
+    return collect_service_health()
+
+@mcp.tool()
+def get_kafka_consumer_health() -> dict[str, Any]:
+    return collect_kafka_consumer_health()
+
+@mcp.tool()
+def get_outbox_backlog() -> dict[str, Any]:
+    return collect_outbox_backlog()
+
+@mcp.tool()
+def get_failed_payments(
+    limit: int = 20,
+) -> dict[str, Any]:
+    return collect_failed_payments(limit=limit)
+
+@mcp.tool()
+def create_incident(
+    title: str,
+    description: str,
+    severity: str,
+    affected_service: str,
+) -> dict[str, Any]:
+    """Create and persist a new incident."""
+
+    with db_pool.connection() as connection:
+        incident = incident_repository.create_incident(
+            connection=connection,
+            title=title,
+            description=description,
+            severity=severity,
+            affected_service=affected_service,
+        )
+
+        return _json_safe(incident)
+
+@mcp.tool()
+def list_active_incidents(
+    limit: int = 20,
+) -> dict[str, Any]:
+    """List open and investigating incidents."""
+
+    with db_pool.connection() as connection:
+        incidents = incident_repository.list_active_incidents(
+            connection=connection,
+            limit=limit,
+        )
+
+        return {
+            "count": len(incidents),
+            "incidents": _json_safe(incidents),
+        }
+
+@mcp.tool()
+def get_incident(
+    incident_id: str,
+) -> dict[str, Any]:
+    """Retrieve an incident and its associated evidence."""
+
+    try:
+        parsed_id = UUID(incident_id)
+    except ValueError:
+        return {"error": "Invalid incident UUID"}
+
+    with db_pool.connection() as connection:
+        incident = incident_repository.get_incident(
+            connection=connection,
+            incident_id=parsed_id,
+        )
+
+        if incident is None:
+            return {"error": "Incident not found"}
+
+        return _json_safe(incident)
+
+@mcp.tool()
+def update_incident_status(
+    incident_id: str,
+    status: str,
+    root_cause: str | None = None,
+    resolution_notes: str | None = None,
+) -> dict[str, Any]:
+    """Update an incident's status and investigation findings."""
+
+    try:
+        parsed_id = UUID(incident_id)
+    except ValueError:
+        return {"error": "Invalid incident UUID"}
+
+    with db_pool.connection() as connection:
+        incident = incident_repository.update_incident_status(
+            connection=connection,
+            incident_id=parsed_id,
+            status=status,
+            root_cause=root_cause,
+            resolution_notes=resolution_notes,
+        )
+
+        if incident is None:
+            return {"error": "Incident not found"}
+
+        return _json_safe(incident)
+
+@mcp.tool()
+def investigate_incident(
+    incident_id: str,
+) -> dict[str, Any]:
+    """Collect diagnostic evidence for an existing incident."""
+
+    try:
+        parsed_id = UUID(incident_id)
+    except ValueError:
+        return {"error": "Invalid incident UUID"}
+
+    return run_incident_investigation(parsed_id)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
