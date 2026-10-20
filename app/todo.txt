@@ -1,0 +1,138 @@
+@mcp.tool()
+def get_active_incidents(
+    limit: int = 20,
+) -> dict[str, Any]:
+    """
+    List incidents that are not marked RESOLVED or CLOSED.
+    """
+
+    safe_limit = max(
+        1,
+        min(limit, 100),
+    )
+
+    rows = _db_query(
+        """
+        SELECT
+            incident_id,
+            incident_type,
+            severity,
+            status,
+            title,
+            description,
+            affected_service,
+            started_at,
+            resolved_at,
+            created_at
+        FROM incidents
+        WHERE UPPER(status) NOT IN ('RESOLVED', 'CLOSED')
+        ORDER BY started_at DESC
+        LIMIT %s
+        """,
+        (safe_limit,),
+    )
+
+    return {
+        "count_returned": len(rows),
+        "incidents": rows,
+    }
+
+
+# ==================================================
+# TOOL 6: Transaction timeline
+# ==================================================
+
+@mcp.tool()
+def get_transaction_timeline(
+    transaction_id: str,
+) -> dict[str, Any]:
+    """
+    Return a payment order, service events, and outbox
+    events associated with one transaction UUID.
+    """
+
+    try:
+        transaction_uuid = UUID(transaction_id)
+
+    except (
+        ValueError,
+        TypeError,
+        AttributeError,
+    ):
+        return {
+            "error": "transaction_id must be a valid UUID"
+        }
+
+    payment = _db_query(
+        """
+        SELECT
+            transaction_id,
+            customer_id,
+            amount,
+            currency,
+            payment_status,
+            payment_method,
+            created_at,
+            updated_at
+        FROM payment_orders
+        WHERE transaction_id = %s
+        """,
+        (transaction_uuid,),
+    )
+
+    service_events = _db_query(
+        """
+        SELECT
+            event_id,
+            service_name,
+            event_type,
+            event_status,
+            latency_ms,
+            error_code,
+            error_message,
+            request_id,
+            trace_id,
+            event_timestamp
+        FROM service_events
+        WHERE transaction_id = %s
+        ORDER BY event_timestamp ASC
+        """,
+        (transaction_uuid,),
+    )
+
+    outbox_events = _db_query(
+        """
+        SELECT
+            event_id,
+            aggregate_id,
+            event_type,
+            status,
+            attempts,
+            created_at,
+            published_at,
+            last_error
+        FROM event_outbox
+        WHERE aggregate_id = %s
+        ORDER BY created_at ASC
+        """,
+        (transaction_uuid,),
+    )
+
+    return {
+        "transaction_id": str(transaction_uuid),
+
+        "payment": (
+            payment[0]
+            if payment
+            else None
+        ),
+
+        "service_events": service_events,
+        "outbox_events": outbox_events,
+
+        "found": bool(
+            payment
+            or service_events
+            or outbox_events
+        ),
+    }

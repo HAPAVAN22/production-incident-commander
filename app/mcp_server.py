@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from psycopg_pool import ConnectionPool
+from psycopg.types.json import Jsonb
 
 from mcp.server.fastmcp import FastMCP
 
@@ -42,18 +43,20 @@ PROMETHEUS_URL = os.getenv(
     "http://localhost:9090",
 ).rstrip("/")
 
+
+MCP_INSTRUCTIONS = (
+    "Tools for an LLM-driven incident commander for a payment system. "
+    "Use incident context and tool results to choose relevant diagnostics; "
+    "do not run every diagnostic by default. Persist diagnostic observations "
+    "against the supplied incident using record_incident_evidence. "
+    "Distinguish observed facts from hypotheses and do not claim root cause "
+    "without supporting evidence. Do not resolve incidents or perform "
+    "remediation autonomously."
+)
+
 mcp = FastMCP(
     "Production Incident Commander",
-    instructions=(
-        "Production incident investigation tools for a payment system. "
-        "Correlate evidence from PostgreSQL and Prometheus. "
-        "Use diagnostic tools to collect observed facts and persist "
-        "relevant findings as incident evidence. "
-        "Do not claim a root cause unless the evidence supports it. "
-        "Clearly distinguish observed facts from hypotheses. "
-        "Do not resolve incidents without sufficient investigation "
-        "and explicit supporting findings."
-    )
+    instructions=MCP_INSTRUCTIONS,
 )
 
 def collect_service_health() -> dict[str, Any]:
@@ -498,18 +501,88 @@ def update_incident_status(
 
         return _json_safe(incident)
 
-@mcp.tool()
-def investigate_incident(
-    incident_id: str,
-) -> dict[str, Any]:
-    """Collect diagnostic evidence for an existing incident."""
+# @mcp.tool()
+# def investigate_incident(
+#     incident_id: str,
+# ) -> dict[str, Any]:
+#     """Collect diagnostic evidence for an existing incident."""
 
+#     try:
+#         parsed_id = UUID(incident_id)
+#     except ValueError:
+#         return {"error": "Invalid incident UUID"}
+
+#     return run_incident_investigation(parsed_id)
+
+@mcp.tool()
+def record_incident_evidence(
+    incident_id: str,
+    event_type: str,
+    source: str,
+    details: dict[str, Any]
+) -> dict[str, Any]:
     try:
         parsed_id = UUID(incident_id)
-    except ValueError:
+    except (TypeError, ValueError):
         return {"error": "Invalid incident UUID"}
 
-    return run_incident_investigation(parsed_id)
+    if event_type not in {
+        "DIAGNOSTIC_RESULT",
+        "DIAGNOSTIC_COLLECTION_FAILED",
+    }:
+        return {"error": "Unsupported evidence event_type"}
+
+    if not source or not source.strip():
+        return {"error": "source must be non-empty"}
+
+    if not isinstance(details, dict):
+        return {"error": "details must be an object"}
+
+    with db_pool.connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM incidents WHERE id = %s",
+                (parsed_id,),
+            )
+
+            if cursor.fetchone() is None:
+                return {"error": "Incident not found"}
+
+            cursor.execute(
+                """
+                INSERT INTO incident_evidence (
+                    incident_id,
+                    event_type,
+                    source,
+                    details
+                )
+                VALUES (%s, %s, %s, %s)
+                RETURNING
+                    id,
+                    incident_id,
+                    event_type,
+                    source,
+                    observed_at,
+                    created_at
+                """,
+                (
+                    parsed_id,
+                    event_type,
+                    source.strip(),
+                    Jsonb(details),
+                ),
+            )
+
+            row = cursor.fetchone() 
+
+    return {
+        "id": str(row[0]),
+        "incident_id": str(row[1]),
+        "event_type": row[2],
+        "source": row[3],
+        "observed_at": row[4].isoformat(),
+        "created_at": row[5].isoformat(),
+    }
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
