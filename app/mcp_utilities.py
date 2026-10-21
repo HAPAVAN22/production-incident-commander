@@ -91,16 +91,16 @@ def _prometheus_query(
         TimeoutError,
         OSError,
         json.JSONDecodeError,
-    ) as exc:
+    ) as exception:
         logger.warning(
             "prometheus_query_failed: %s",
-            exc,
+            exception,
         )
 
         return {
             "available": False,
             "query": query,
-            "error": str(exc),
+            "error": str(exception),
         }
 
     if body.get("status") != "success":
@@ -121,17 +121,64 @@ def _prometheus_query(
 
         results.append({
             "labels": metric,
-            "value": (
-                value[1]
-                if len(value) > 1
-                else None
-            )
+            "timestamp": value[0] if len(value) > 0 else None,
+            "value": value[1] if len(value) > 1 else None,
         })
 
     return {
         "available": True,
-        "query": query,
+        "query": query,"result_type": body.get("data", {}).get("resultType"),
+        "result_count": len(results),
+        "no_matching_series": len(results) == 0,
         "results": results,
+    }
+
+def _prometheus_metric_names(
+    name_filter: str = "",
+    limit: int = 100
+) -> dict[str, Any]:
+    """Discover metric names available in Prometheus."""
+    safe_limit = max(1, min(int(limit), 500))
+    url = f"{PROMETHEUS_URL}/api/v1/label/__name__/values"
+
+    try:
+        with urlopen(url, timeout=4) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (
+        HTTPError,
+        URLError,
+        TimeoutError,
+        OSError,
+        json.JSONDecodeError,
+    ) as exc:
+        logger.warning("Prometheus metric discovery failed: %s", exc)
+        return {
+            "available": False,
+            "error": str(exc),
+            "metrics": [],
+        }
+
+    if body.get("status") != "success":
+        return {
+            "available": False,
+            "error": body.get("error", "Metric discovery failed"),
+            "metrics": [],
+        }
+
+    metrics = body.get("data", [])
+    if name_filter.strip():
+        needle = name_filter.strip().lower()
+        metrics = [
+            name for name in metrics
+            if needle in name.lower()
+        ]
+
+    metrics = sorted(metrics)
+    return {
+        "available": True,
+        "count_returned": min(len(metrics), safe_limit),
+        "truncated": len(metrics) > safe_limit,
+        "metrics": metrics[:safe_limit],
     }
 
 def _instant_value(
@@ -143,15 +190,20 @@ def _instant_value(
     values = result.get("results", [])
 
     if not values:
-        return 0.0
+        return None
 
     try:
-        return sum(
+        usable_values = [
             float(item["value"])
             for item in values
             if item.get("value") is not None
-        )
-    except (TypeError, ValueError):
+        ]
+    except (KeyError, TypeError, ValueError):
         return None
+
+    if not usable_values:
+        return None
+
+    return sum(usable_values)
 
     

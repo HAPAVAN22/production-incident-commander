@@ -17,6 +17,7 @@ from app.mcp_utilities import (
     _json_safe,
     _db_query,
     _prometheus_query,
+    _prometheus_metric_names,
     _instant_value
 )
 
@@ -44,47 +45,73 @@ PROMETHEUS_URL = os.getenv(
 ).rstrip("/")
 
 
-MCP_INSTRUCTIONS = (
-    "Tools for an LLM-driven incident commander for a payment system. "
-    "Use incident context and tool results to choose relevant diagnostics; "
-    "do not run every diagnostic by default. Persist diagnostic observations "
-    "against the supplied incident using record_incident_evidence. "
-    "Distinguish observed facts from hypotheses and do not claim root cause "
-    "without supporting evidence. Do not resolve incidents or perform "
-    "remediation autonomously."
-)
+MCP_INSTRUCTIONS = """
+Tools for investigating incidents in a payment platform.
+
+Use incident details and existing evidence to decide which diagnostic tools
+are relevant. Do not run every diagnostic automatically.
+
+You may discover available Prometheus metrics and execute read-only PromQL
+instant queries when predefined health summaries are insufficient.
+
+Inspect actual tool results. Distinguish zero from missing data, unavailable
+sources, and potentially stale metrics. Correlate independent evidence where
+useful, and explain uncertainty.
+
+Persist diagnostic observations against the existing incident using
+record_incident_evidence. Never fabricate measurements or evidence IDs.
+
+Do not execute remediation or resolve incidents autonomously.
+"""
 
 mcp = FastMCP(
     "Production Incident Commander",
     instructions=MCP_INSTRUCTIONS,
 )
 
-def collect_service_health() -> dict[str, Any]:
+def collect_service_health(window: str = "5m") -> dict[str, Any]:
     """
-    API availability, HTTP 5xx rate, p95 latency, Kafka consumer lag
+    API availability, HTTP 5xx rate, p95 latency, and Kafka consumer lag.
+
+    Args:
+        window: Prometheus range window, e.g. 5m, 30m, 1h.
     """
+    import re
+
+    # Validate the window before interpolating it into PromQL.
+    match = re.fullmatch(r"([1-9]\d*)(m|h)", window)
+
+    if not match:
+        raise ValueError(
+            "Invalid window. Use a duration such as 5m, 30m, or 1h."
+        )
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+    window_minutes = amount * (60 if unit == "h" else 1)
+
+    if window_minutes > 1440:
+        raise ValueError("Window cannot exceed 24h.")
+
     checks = {
         "api_targets_up": _prometheus_query(
             'up{job="production-incident-commander"}'
         ),
-        "http_5xx_per_second_5m": _prometheus_query(
-            'sum(rate('
-            'http_requests_total{status_code=~"5.."}'
-            '[5m]))'
+        f"http_5xx_per_second_{window}": _prometheus_query(
+            f'sum(rate(http_requests_total{{status_code=~"5.."}}[{window}]))'
         ),
-        "http_p95_latency_seconds_5m": _prometheus_query(
-            'histogram_quantile(0.95, '
-            'sum by (le) ('
-            'rate(http_request_duration_seconds_bucket[5m])'
-            '))'
+        f"http_p95_latency_seconds_{window}": _prometheus_query(
+            "histogram_quantile(0.95, "
+            "sum by (le) ("
+            f"rate(http_request_duration_seconds_bucket[{window}])"
+            "))"
         ),
         "kafka_consumer_lag": _prometheus_query(
             "sum(kafka_consumer_lag)"
-        )
+        ),
     }
 
     api_up_result = checks["api_targets_up"]
-
     api_up = None
 
     if api_up_result.get("available"):
@@ -94,30 +121,29 @@ def collect_service_health() -> dict[str, Any]:
         ]
 
         api_up = bool(values) and all(
-            value == "1"
-            for value in values
+            value == "1" for value in values
         )
 
     return {
-        "checked_at_utc": datetime.now(
-            timezone.utc
-        ).isoformat(),
+        "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+        "window": window,
         "api_targets_up": api_up,
-        "http_5xx_per_second_5m": _instant_value(
-            checks["http_5xx_per_second_5m"]
+        f"http_5xx_per_second_{window}": _instant_value(
+            checks[f"http_5xx_per_second_{window}"]
         ),
-        "http_p95_latency_seconds_5m": _instant_value(
-            checks["http_p95_latency_seconds_5m"]
+        f"http_p95_latency_seconds_{window}": _instant_value(
+            checks[f"http_p95_latency_seconds_{window}"]
         ),
         "kafka_consumer_lag": _instant_value(
             checks["kafka_consumer_lag"]
         ),
         "sources": checks,
         "notes": [
-            "A null value means the query was unavailable "
-            "or has no usable sample.",
-            "Consumer lag may be stale if the lag monitor "
-            "stops updating its gauge.",
+            "HTTP error rate and p95 latency use the requested window.",
+            "API target availability and Kafka consumer lag are instant "
+            "queries, not historical measurements over that window.",
+            "A null value means the query was unavailable or has no usable sample.",
+            "Consumer lag may be stale if the lag monitor stops updating its gauge.",
         ],
     }
 
@@ -169,11 +195,11 @@ def collect_kafka_consumer_health() -> dict[str, Any]:
 
         "sources": results,
 
-        "interpretation": (
-            "Zero throughput alone does not prove an outage. "
-            "Check exporter availability, lag, and whether "
-            "the consumer is expected to receive messages."
-        ),
+        # "interpretation": (
+        #     "Zero throughput alone does not prove an outage. "
+        #     "Check exporter availability, lag, and whether "
+        #     "the consumer is expected to receive messages."
+        # ),
     }
 
 def collect_outbox_backlog() -> dict[str, Any]:
@@ -282,123 +308,10 @@ def collect_failed_payments(
         "payments": rows,
     }
 
-def run_incident_investigation(
-    incident_id: UUID
-) -> dict[str, Any]:
-    """
-    Run diagnostics and persist their results as incident evidence.
-    This is ordinary Python logic called by the MCP-exposed tool.
-    """
-
-    with db_pool.connection() as connection:
-        incident = incident_repository.get_incident(
-            connection=connection,
-            incident_id=incident_id,
-        )
-
-        if incident is None:
-            return {"error": "Incident not found"}
-
-        if incident["status"] == "RESOLVED":
-            return {
-                "error": "Cannot investigate a resolved incident",
-                "incident_id": str(incident_id),
-            }
-
-        # 2. Mark an open incident as being investigated.
-        if incident["status"] == "OPEN":
-            incident = incident_repository.update_incident_status(
-                connection=connection,
-                incident_id=incident_id,
-                status="INVESTIGATING",
-            )
-
-    # 3. Collect each diagnostic independently.
-    collectors = {
-        "service_health": collect_service_health,
-        "kafka_consumer_health": collect_kafka_consumer_health,
-        "outbox_backlog": collect_outbox_backlog,
-        "failed_payments": collect_failed_payments,
-    }
-
-    results: dict[str, Any] = {}
-    failures: dict[str, str] = {}
-
-    for name, collector in collectors.items():
-        try:
-            results[name] = collector()
-
-        except Exception as exc:
-            # Preserve the other diagnostic results if one fails.
-            logger.exception(
-                "Diagnostic collector failed: %s",
-                name,
-            )
-
-            failures[name] = str(exc)
-
-    # 4. Persist results and failures as incident evidence.
-    evidence_records = []
-
-    with db_pool.connection() as connection:
-        for name, result in results.items():
-            evidence = incident_repository.add_incident_evidence(
-                connection=connection,
-                incident_id=incident_id,
-                event_type="DIAGNOSTIC_RESULT",
-                source=name,
-                details=result,
-            )
-
-            evidence_records.append({
-                "id": str(evidence["id"]),
-                "source": name,
-                "event_type": "DIAGNOSTIC_RESULT",
-            })
-
-        for name, error in failures.items():
-            evidence = incident_repository.add_incident_evidence(
-                connection=connection,
-                incident_id=incident_id,
-                event_type="DIAGNOSTIC_COLLECTION_FAILED",
-                source=name,
-                details={
-                    "available": False,
-                    "error": error,
-                },
-            )
-
-            evidence_records.append({
-                "id": str(evidence["id"]),
-                "source": name,
-                "event_type": "DIAGNOSTIC_COLLECTION_FAILED",
-            })
-
-        # Fetch the incident again so the response includes
-        # the evidence that was just persisted.
-        updated_incident = incident_repository.get_incident(
-            connection=connection,
-            incident_id=incident_id,
-        )
-
-    # 5. Return a structured investigation report.
-    return _json_safe({
-        "incident_id": str(incident_id),
-        "status": updated_incident["status"],
-        "diagnostics_completed": list(results.keys()),
-        "diagnostics_failed": failures,
-        "results": results,
-        "evidence_records": evidence_records,
-        "evidence_count": len(evidence_records),
-        "conclusion": (
-            "Diagnostics collected. Findings have been persisted. "
-            "No root cause has been automatically established."
-        ),
-    })
-
 @mcp.tool()
-def get_service_health() -> dict[str, Any]:
-    return collect_service_health()
+def get_service_health(window: str = "5m") -> dict:
+    """Get service health using the specified Prometheus lookback window."""
+    return collect_service_health(window=window)
 
 @mcp.tool()
 def get_kafka_consumer_health() -> dict[str, Any]:
@@ -583,6 +496,41 @@ def record_incident_evidence(
         "observed_at": row[4].isoformat(),
         "created_at": row[5].isoformat(),
     }
+
+
+@mcp.tool()
+def query_prometheus(query: str) -> dict[str, Any]:
+    """
+    Execute a read-only Prometheus instant query using PromQL.
+
+    Use this to investigate metrics not covered by predefined health tools.
+    The result preserves query availability and the individual time series.
+    """
+    if not query or not query.strip():
+        return {
+            "available": False,
+            "error": "PromQL query cannot be empty",
+        }
+
+    # Only instant queries are supported by this helper.
+    # Production deployments should also validate query cost and access.
+    return _prometheus_query(query.strip())
+
+
+@mcp.tool()
+def list_prometheus_metrics(
+    name_filter: str = "",
+    limit: int = 100,
+) -> dict[str, Any]:
+    """
+    Discover metric names exposed by the configured Prometheus server.
+
+    Optionally filter metric names by a substring.
+    """
+    return _prometheus_metric_names(
+        name_filter=name_filter,
+        limit=limit,
+    )
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
