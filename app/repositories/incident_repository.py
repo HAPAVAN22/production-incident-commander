@@ -7,19 +7,22 @@ from psycopg.types.json import Jsonb
 
 from app.config import get_settings
 
+from app.models.incident import (
+    IncidentCreate,
+    IncidentEvidenceCreate,
+    IncidentEvidenceResponse,
+    IncidentResponse,
+    IncidentSeverity,
+    IncidentStatus,
+    IncidentStatusUpdate,
+)
+
 settings = get_settings()
 
 def create_incident(
     connection: Connection,
-    title: str,
-    description: str,
-    severity: str,
-    affected_service: str,
+    payload: IncidentCreate,
 ) -> dict[str, Any]:
-    severity = severity.upper()
-
-    if severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
-        raise ValueError("Invalid incident severity")
 
     with connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
@@ -33,14 +36,19 @@ def create_incident(
             VALUES (%s, %s, %s, %s)
             RETURNING *
             """,
-            (title, description, severity, affected_service),
+            (
+                payload.title,
+                payload.description,
+                payload.severity.value,
+                payload.affected_service,
+            ),
         )
         row = cursor.fetchone()
 
         if row is None:
             raise RuntimeError("Incident creation returned no row")
 
-        return dict(row)
+        return IncidentResponse(**row).model_dump(mode="python")
 
 def list_active_incidents(
     connection: Connection,
@@ -53,21 +61,32 @@ def list_active_incidents(
             """
             SELECT *
             FROM incidents
-            WHERE status IN ('OPEN', 'INVESTIGATING')
+            WHERE status IN (%s, %s)
             ORDER BY
                 CASE severity
-                    WHEN 'CRITICAL' THEN 1
-                    WHEN 'HIGH' THEN 2
-                    WHEN 'MEDIUM' THEN 3
-                    WHEN 'LOW' THEN 4
+                    WHEN %s THEN 1
+                    WHEN %s THEN 2
+                    WHEN %s THEN 3
+                    WHEN %s THEN 4
                 END,
                 created_at DESC
             LIMIT %s
             """,
-            (limit,),
+            (
+                IncidentStatus.OPEN.value,
+                IncidentStatus.INVESTIGATING.value,
+                IncidentSeverity.CRITICAL.value,
+                IncidentSeverity.HIGH.value,
+                IncidentSeverity.MEDIUM.value,
+                IncidentSeverity.LOW.value,
+                limit,
+            ),
         )
 
-        return [dict(row) for row in cursor.fetchall()]
+        return [
+            IncidentResponse(**row).model_dump(mode="python")
+            for row in cursor.fetchall()
+        ]
 
 def get_incident(
     connection: Connection,
@@ -87,8 +106,8 @@ def get_incident(
         if row is None:
             return None
 
-        incident = dict(row)
-
+        incident = IncidentResponse(**row).model_dump(mode="python")
+        
         cursor.execute(
             """
             SELECT *
@@ -98,8 +117,10 @@ def get_incident(
             """,
             (incident_id,),
         )
+
         incident["evidence"] = [
-            dict(evidence) for evidence in cursor.fetchall()
+            IncidentEvidenceResponse(**evidence).model_dump(mode="python")
+            for evidence in cursor.fetchall()
         ]
 
         return incident
@@ -107,9 +128,7 @@ def get_incident(
 def add_incident_evidence(
     connection: Connection,
     incident_id: UUID,
-    event_type: str,
-    source: str,
-    details: dict[str, Any]
+    payload: IncidentEvidenceCreate,
 ) -> dict[str, Any]:
     with connection.cursor(row_factory=dict_row) as cursor:
         cursor.execute(
@@ -125,9 +144,9 @@ def add_incident_evidence(
             """,
             (
                 incident_id,
-                event_type,
-                source,
-                Jsonb(details),
+                payload.event_type.value,
+                payload.source,
+                Jsonb(payload.details),
             ),
         )
         row = cursor.fetchone()
@@ -135,14 +154,12 @@ def add_incident_evidence(
         if row is None:
             raise RuntimeError("Evidence creation returned no row")
 
-        return dict(row)
+        return IncidentEvidenceResponse(**row).model_dump(mode="python")
 
 def update_incident_status(
     connection: Connection,
     incident_id: UUID,
-    status: str,
-    root_cause: str | None = None,
-    resolution_notes: str | None = None
+    payload: IncidentStatusUpdate,
 ) -> dict[str, Any] | None:
     status = status.upper()
 
@@ -156,15 +173,14 @@ def update_incident_status(
             SET
                 status = %s,
                 root_cause = COALESCE(%s, root_cause),
-                resolution_notes =
-                    COALESCE(%s, resolution_notes),
+                resolution_notes = COALESCE(%s, resolution_notes),
                 acknowledged_at = CASE
-                    WHEN %s = 'INVESTIGATING'
+                    WHEN %s = %s
                     THEN COALESCE(acknowledged_at, NOW())
                     ELSE acknowledged_at
                 END,
                 resolved_at = CASE
-                    WHEN %s = 'RESOLVED' THEN NOW()
+                    WHEN %s = %s THEN NOW()
                     ELSE NULL
                 END,
                 updated_at = NOW()
@@ -172,14 +188,16 @@ def update_incident_status(
             RETURNING *
             """,
             (
-                status,
-                root_cause,
-                resolution_notes,
-                status,
-                status,
+                payload.status.value,
+                payload.root_cause,
+                payload.resolution_notes,
+                payload.status.value,
+                IncidentStatus.INVESTIGATING.value,
+                payload.status.value,
+                IncidentStatus.RESOLVED.value,
                 incident_id,
             ),
         )
         row = cursor.fetchone()
 
-        return dict(row) if row else None
+        return IncidentResponse(**row).model_dump(mode="python")

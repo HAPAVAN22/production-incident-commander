@@ -1,15 +1,15 @@
 global:
-  scrape_interval: 5s
+  scrape_interval: 30s
 
 scrape_configs:
-  - job_name: "production-incident-commander"
+  - job_name: "incident-commander"
     static_configs:
-      - targets: ["host.docker.internal:8000"]
-  
+      - targets: ["api:8000"]
+
   - job_name: "payments-events-consumer"
     static_configs:
-      - targets: ["host.docker.internal:8001"]
+      - targets: ["payments-consumer:8001"]
 
   - job_name: "kafka-lag-monitor"
     static_configs:
-      - targets: ["host.docker.internal:8002"]
+      - targets: ["kafka-lag-monitor:8002"]
