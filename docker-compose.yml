@@ -3,7 +3,8 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: ${API_DOCKERFILE:-Dockerfile}
+    image: ${API_IMAGE_NAME:-incident-commander-api}:${API_IMAGE_TAG:-latest}
     container_name: incident-commander-api
     restart: unless-stopped
     env_file:
@@ -11,6 +12,8 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       PROMETHEUS_URL: http://prometheus:9090
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4-mini}
+      INCIDENT_AGENT_MAX_TURNS: ${INCIDENT_AGENT_MAX_TURNS:-24}
     expose:
       - "8000"
     depends_on:
@@ -18,9 +21,14 @@ services:
       - prometheus
     networks:
       - incident-net
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-10m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-3}
 
   kafka:
-    image: apache/kafka:4.1.0
+    image: apache/kafka:${KAFKA_VERSION:-4.1.0}
     container_name: incident-commander-kafka
     restart: unless-stopped
     environment:
@@ -39,9 +47,14 @@ services:
       - kafka_data:/var/lib/kafka/data
     networks:
       - incident-net
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-10m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-3}
 
   prometheus:
-    image: prom/prometheus:v3.5.0
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.5.0}
     container_name: pic-prometheus
     restart: unless-stopped
     command:
@@ -55,9 +68,15 @@ services:
       - "9090"
     networks:
       - incident-net
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-10m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-3}
+
 
   grafana:
-    image: grafana/grafana:12.2.0
+    image: grafana/grafana:${GRAFANA_VERSION:-12.2.0}
     container_name: pic-grafana
     restart: unless-stopped
     environment:
@@ -73,17 +92,22 @@ services:
       - prometheus
     networks:
       - incident-net
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-10m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-3}
 
   caddy:
-    image: caddy:2
+    image: caddy:${CADDY_VERSION:-2}
     container_name: incident-commander-caddy
     restart: unless-stopped
     environment:
       API_DOMAIN: ${API_DOMAIN:?Set API_DOMAIN in .env}
     ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
+      - "${HTTP_HOST_PORT:-80}:80"
+      - "${HTTPS_HOST_PORT:-443}:443"
+      - "${HTTPS_UDP_HOST_PORT:-443}:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -92,6 +116,11 @@ services:
       - api
     networks:
       - incident-net
+    logging:
+      driver: json-file
+      options:
+        max-size: ${CONTAINER_LOG_MAX_SIZE:-10m}
+        max-file: ${CONTAINER_LOG_MAX_FILES:-3}
 
 networks:
   incident-net:
